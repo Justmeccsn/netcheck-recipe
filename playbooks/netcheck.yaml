@@ -1,0 +1,147 @@
+- name: dependency provisioning
+  hosts: netcheck
+  become: yes
+  become_method: sudo
+  gather_facts: false
+  tasks:
+    - name: install python2
+      raw: sudo apt-get -y install python-simplejson
+
+
+- name: Create code server
+  hosts: netcheck
+  tasks:
+    - name: include encrypted vars
+      include_vars: vars/main.yaml
+
+    - name: install packages
+      apt:
+        name: "{{ item }}"
+        update_cache: yes
+      with_items:
+        - nginx
+        - git
+        - postgresql
+        - python3.6
+        - python3.6-dev
+        - python-psycopg2
+        - build-essential
+
+    - name: update python3 link
+      file:
+        src: /usr/bin/python3.6
+        dest: /usr/bin/python3
+        state: link
+
+    - name: install pip3
+      get_url:
+        url: https://bootstrap.pypa.io/get-pip.py
+        dest: /tmp/get-pip.py
+
+    - name: install pip3
+      command: python3 /tmp/get-pip.py
+
+    - name: installize github repo
+      known_hosts:
+        name: "{{ item }}"
+        key: "{{ lookup('pipe', 'ssh-keyscan {{ item }}, `dig +short {{ item }}`') }}"
+      with_items:
+       - github.com
+
+    - name: install repo
+      git:
+        repo: git@github.com:Justmeccsn/netcheck.git
+        dest: /app
+        version: filter_tenancy_v2
+
+    - name: install pip packages
+      pip:
+        requirements: /app/requirements.txt
+
+    - name: Copy configuration file
+      template:
+        src: templates/configuration.py
+        dest: /app/netbox/netbox/configuration.py
+
+    - postgresql_db:
+        name: netbox
+      become: true
+      become_method: su
+      become_user: postgres
+
+    - postgresql_user:
+        db: netbox
+        name: root
+        priv: ALL
+      become: true
+      become_method: su
+      become_user: postgres
+
+    - name: migrate database
+      command: python3 manage.py migrate --no-input
+      args:
+        chdir: /app/netbox
+
+    - name: create static files
+      command: python3 manage.py collectstatic --no-input
+      args:
+        chdir: /app/netbox
+
+
+    - name: install gunicorn
+      pip:
+        name: gunicorn
+
+    - name: Create user netcheck
+      user:
+        name: netcheck
+        createhome: no
+
+    - name: Create run directory
+      file:
+        path: /run/gunicorn
+        state: directory
+
+    - name: Copy files into systemd
+      copy:
+        src: files/gunicorn.service
+        dest: /lib/systemd/system/gunicorn.service
+
+    - name: Copy files into systemd
+      copy:
+        src: files/gunicorn.socket
+        dest: /lib/systemd/system/gunicorn.socket
+
+    - name: Copy files into systemd
+      copy:
+        src: files/gunicorn.conf
+        dest: /etc/tmpfiles.d/gunicorn.conf
+
+    - name: set start handlers
+      command: systemctl enable gunicorn.socket
+
+    - name: start sockt service
+      command: systemctl start gunicorn.socket
+
+    - name: start gunicorn
+      command: service gunicorn start
+
+    - name: remove default config
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: copy site configuration
+      copy:
+        src: files/nginx.conf
+        dest: /etc/nginx/sites-enabled/netcheck
+
+    - name: restart nginx
+      service:
+        name: nginx
+        state: restarted
+
+    - name: restart nginx
+      service:
+        name: gunicorn.socket
+        state: restarted
